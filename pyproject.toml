@@ -1,0 +1,24 @@
+[project]
+name = "sofe-server"
+version = "0.1.0"
+description = "SOFE API Server — FinOps Policies as Code REST API"
+requires-python = ">=3.11"
+license = {text = "Apache-2.0"}
+authors = [{name = "Carlos Cortez", email = "carlos@cortez.cloud"}]
+readme = "README.md"
+dependencies = [
+    "sofe>=0.1.0",
+    "fastapi>=0.111.0",
+    "uvicorn>=0.30.0",
+    "pydantic>=2.0",
+]
+
+[project.scripts]
+sofe-server = "sofe_server.main:run"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["sofe_server*"]

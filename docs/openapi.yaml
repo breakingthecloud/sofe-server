@@ -1,0 +1,219 @@
+openapi: "3.1.0"
+info:
+  title: SOFE API
+  version: 0.1.0
+  description: "Stairway Open FinOps Engine — REST API for evaluating FinOps policies against AWS infrastructure"
+  license:
+    name: Apache 2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+  contact:
+    name: Carlos Cortez
+    url: https://cortez.cloud
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+  - url: https://api.sofe.dev
+    description: Hosted (requires API key)
+
+security:
+  - ApiKeyAuth: []
+  - {}
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      operationId: health
+      security: []
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: "ok" }
+                  version: { type: string, example: "0.1.0" }
+
+  /evaluate:
+    post:
+      summary: Evaluate policies against live AWS resources
+      operationId: evaluate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EvaluateRequest"
+      responses:
+        "200":
+          description: Evaluation results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvaluateResponse"
+        "422":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+
+  /validate:
+    post:
+      summary: Validate policy YAML without evaluating
+      operationId: validate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [policy_yaml]
+              properties:
+                policy_yaml:
+                  type: string
+                  description: Raw YAML content of the policy
+      responses:
+        "200":
+          description: Validation result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  valid: { type: boolean }
+                  errors: { type: array, items: { type: string } }
+
+  /policies:
+    get:
+      summary: List loaded policies
+      operationId: listPolicies
+      parameters:
+        - name: policies_dir
+          in: query
+          schema: { type: string, default: "./policies" }
+      responses:
+        "200":
+          description: List of policies
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PolicySummary"
+
+  /metrics:
+    get:
+      summary: List available metrics
+      operationId: listMetrics
+      responses:
+        "200":
+          description: Available metrics
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/MetricInfo"
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+
+  schemas:
+    EvaluateRequest:
+      type: object
+      properties:
+        policies_dir:
+          type: string
+          default: "./policies"
+          description: Path to policies directory
+        profile:
+          type: string
+          description: AWS profile name
+        resource_types:
+          type: array
+          items: { type: string }
+          description: Filter resource types (e.g., ["aws.ec2", "aws.s3"])
+        regions:
+          type: array
+          items: { type: string }
+          description: Filter regions
+        fail_on:
+          type: string
+          enum: [critical, high, medium, low]
+          description: Severity threshold for failure
+
+    EvaluateResponse:
+      type: object
+      properties:
+        evaluation_id:
+          type: string
+          format: uuid
+        timestamp:
+          type: string
+          format: date-time
+        policies_evaluated:
+          type: integer
+        resources_scanned:
+          type: integer
+        findings_count:
+          type: integer
+        total_estimated_savings:
+          type: number
+        findings:
+          type: array
+          items:
+            $ref: "#/components/schemas/Finding"
+        failed:
+          type: boolean
+          description: "True if findings at/above fail_on severity"
+
+    Finding:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        policy_name: { type: string }
+        severity: { type: string, enum: [critical, high, medium, low, info] }
+        resource_id: { type: string }
+        resource_type: { type: string }
+        region: { type: string }
+        account_id: { type: string }
+        message: { type: string }
+        metric_name: { type: string }
+        metric_value: { type: number }
+        threshold: { type: number }
+        estimated_savings: { type: number, nullable: true }
+        recommendation: { type: string, nullable: true }
+        timestamp: { type: string, format: date-time }
+
+    PolicySummary:
+      type: object
+      properties:
+        name: { type: string }
+        description: { type: string }
+        severity: { type: string }
+        resource_types: { type: array, items: { type: string } }
+        metric: { type: string }
+
+    MetricInfo:
+      type: object
+      properties:
+        name: { type: string }
+        source: { type: string }
+        resource_types: { type: array, items: { type: string } }
+        description: { type: string }
+
+    ProblemDetail:
+      type: object
+      properties:
+        type: { type: string }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
