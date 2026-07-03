@@ -166,3 +166,27 @@ def _get_collector_metrics(resource_type: str) -> list[str]:
         "aws.sagemaker": ["invocations_per_day", "monthly_cost"],
     }
     return metrics_map.get(resource_type, ["monthly_cost"])
+
+
+@app.post("/connect/test")
+async def test_connection(body: dict):
+    """Test STS AssumeRole — verifies the user's IAM role works."""
+    import boto3
+    role_arn = body.get("role_arn")
+    external_id = body.get("external_id")
+    
+    if not role_arn or not external_id:
+        raise HTTPException(status_code=400, detail="role_arn and external_id required")
+    
+    try:
+        sts = boto3.client("sts")
+        resp = sts.assume_role(
+            RoleArn=role_arn,
+            RoleSessionName="sofe-connect-test",
+            ExternalId=external_id,
+            DurationSeconds=900,
+        )
+        account_id = resp["AssumedRoleUser"]["Arn"].split(":")[4]
+        return {"success": True, "account_id": account_id}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"AssumeRole failed: {str(e)}")
