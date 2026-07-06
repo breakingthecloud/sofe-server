@@ -65,6 +65,11 @@ async def evaluate_endpoint(req: EvaluateRequest):
 
     total_savings = sum(f.estimated_savings or 0 for f in findings)
 
+    # Count resources by type for topology visualization
+    resources_by_type: dict[str, int] = {}
+    for r in resources:
+        resources_by_type[r.resource_type] = resources_by_type.get(r.resource_type, 0) + 1
+
     return {
         "evaluation_id": str(uuid.uuid4()),
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -73,6 +78,7 @@ async def evaluate_endpoint(req: EvaluateRequest):
         "findings_count": len(findings),
         "total_estimated_savings": total_savings,
         "failed": failed,
+        "resources_by_type": resources_by_type,
         "findings": [
             {
                 "id": str(uuid.uuid4()),
