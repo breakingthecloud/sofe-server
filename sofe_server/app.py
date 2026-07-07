@@ -70,6 +70,9 @@ async def evaluate_endpoint(req: EvaluateRequest):
     for r in resources:
         resources_by_type[r.resource_type] = resources_by_type.get(r.resource_type, 0) + 1
 
+    # Get remediation commands for each finding
+    from sofe.remediation.commands import get_remediation_commands
+
     return {
         "evaluation_id": str(uuid.uuid4()),
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -91,6 +94,9 @@ async def evaluate_endpoint(req: EvaluateRequest):
                 "message": f.message,
                 "estimated_savings": f.estimated_savings,
                 "recommendation": f.recommendation,
+                "remediation_commands": get_remediation_commands(
+                    f.policy_name, f.resource_id, f.resource_type, f.region, f.account_id or ""
+                ),
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
             for f in findings
