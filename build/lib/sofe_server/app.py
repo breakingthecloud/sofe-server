@@ -65,6 +65,14 @@ async def evaluate_endpoint(req: EvaluateRequest):
 
     total_savings = sum(f.estimated_savings or 0 for f in findings)
 
+    # Count resources by type for topology visualization
+    resources_by_type: dict[str, int] = {}
+    for r in resources:
+        resources_by_type[r.resource_type] = resources_by_type.get(r.resource_type, 0) + 1
+
+    # Get remediation commands for each finding
+    from sofe.remediation.commands import get_remediation_commands
+
     return {
         "evaluation_id": str(uuid.uuid4()),
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -73,6 +81,7 @@ async def evaluate_endpoint(req: EvaluateRequest):
         "findings_count": len(findings),
         "total_estimated_savings": total_savings,
         "failed": failed,
+        "resources_by_type": resources_by_type,
         "findings": [
             {
                 "id": str(uuid.uuid4()),
@@ -85,6 +94,9 @@ async def evaluate_endpoint(req: EvaluateRequest):
                 "message": f.message,
                 "estimated_savings": f.estimated_savings,
                 "recommendation": f.recommendation,
+                "remediation_commands": get_remediation_commands(
+                    f.policy_name, f.resource_id, f.resource_type, f.region, f.account_id or ""
+                ),
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
             for f in findings
@@ -147,23 +159,23 @@ async def list_collectors():
 def _get_collector_metrics(resource_type: str) -> list[str]:
     """Return known metrics for a resource type."""
     metrics_map = {
-        "aws.ec2": ["avg_cpu_utilization", "monthly_cost", "running_days", "has_tag:*"],
-        "aws.s3": ["monthly_cost", "has_lifecycle_rules", "encryption_enabled", "has_tag:*"],
-        "aws.lambda": ["monthly_cost", "has_tag:*"],
-        "aws.rds": ["avg_connections", "monthly_cost", "has_tag:*"],
-        "aws.ebs": ["attached", "monthly_cost", "snapshot_age_days"],
-        "aws.ecs": ["avg_cpu_utilization", "running_count", "desired_count"],
-        "aws.eks": ["monthly_cost"],
-        "aws.elasticache": ["avg_connections", "monthly_cost"],
-        "aws.redshift": ["monthly_cost"],
-        "aws.dynamodb": ["provisioned_utilization_percent", "monthly_cost"],
-        "aws.cloudfront": ["compression_enabled", "monthly_cost"],
-        "aws.apigateway": ["throttle_configured", "monthly_cost"],
-        "aws.natgateway": ["monthly_cost"],
-        "aws.elb": ["has_targets", "waf_enabled", "monthly_cost"],
-        "aws.route53": ["record_count"],
-        "aws.secretsmanager": ["rotation_enabled"],
-        "aws.sagemaker": ["invocations_per_day", "monthly_cost"],
+        "aws.ec2": ["avg_cpu_utilization", "monthly_cost", "running_days", "has_tag:*", "purchase_option_spot", "instance_generation_old", "ebs_optimized", "public_ip_attached"],
+        "aws.s3": ["monthly_cost", "encryption_enabled", "has_lifecycle_rules", "has_tag:*", "versioning_enabled", "public_access_blocked", "logging_enabled"],
+        "aws.lambda": ["monthly_cost", "has_tag:*", "memory_size_mb", "timeout_seconds", "runtime_deprecated", "code_size_mb"],
+        "aws.rds": ["avg_connections", "monthly_cost", "has_tag:*", "multi_az", "storage_encrypted", "backup_retention_days", "publicly_accessible"],
+        "aws.ebs": ["attached", "monthly_cost", "has_tag:*", "size_gb", "volume_type_gp2", "encrypted"],
+        "aws.ecs": ["avg_cpu_utilization", "has_tag:*", "running_count", "desired_count", "launch_type_fargate"],
+        "aws.eks": ["monthly_cost", "has_tag:*", "endpoint_public_access", "logging_enabled", "version_outdated"],
+        "aws.elasticache": ["monthly_cost", "at_rest_encryption", "transit_encryption", "num_nodes"],
+        "aws.redshift": ["monthly_cost", "encrypted", "publicly_accessible", "num_nodes"],
+        "aws.dynamodb": ["monthly_cost", "has_tag:*", "billing_mode_provisioned", "item_count", "table_size_mb"],
+        "aws.cloudfront": ["compression_enabled", "monthly_cost", "https_only", "waf_enabled", "price_class_all"],
+        "aws.apigateway": ["throttle_configured", "monthly_cost", "logging_enabled", "endpoint_type_edge"],
+        "aws.natgateway": ["monthly_cost", "connectivity_public"],
+        "aws.elb": ["has_targets", "monthly_cost", "waf_enabled", "internet_facing"],
+        "aws.route53": ["record_count", "private_zone"],
+        "aws.secretsmanager": ["rotation_enabled", "days_since_last_rotation", "days_since_last_access"],
+        "aws.sagemaker": ["monthly_cost", "instance_count", "endpoint_active"],
     }
     return metrics_map.get(resource_type, ["monthly_cost"])
 
