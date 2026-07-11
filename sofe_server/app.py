@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 from sofe.loader import load_policies, validate_policies
 from sofe.collectors import collect_all
-from sofe.engine import evaluate
+from sofe.engine import evaluate, evaluate_architecture
 
 app = FastAPI(
     title="SOFE API",
@@ -52,7 +52,10 @@ async def evaluate_endpoint(req: EvaluateRequest):
         regions=req.regions,
     )
 
-    findings = evaluate(policies, resources)
+    # Architecture-aware evaluation (includes cross-resource analysis)
+    arch_result = evaluate_architecture(policies, resources)
+    findings = arch_result["findings"]
+    insights = arch_result["insights"]
 
     severity_order = ["critical", "high", "medium", "low", "info"]
     failed = False
@@ -65,10 +68,17 @@ async def evaluate_endpoint(req: EvaluateRequest):
 
     total_savings = sum(f.estimated_savings or 0 for f in findings)
 
-    # Count resources by type for topology visualization
+    # Count resources by type for topology visualization + include IDs for BYaML generation
     resources_by_type: dict[str, int] = {}
+    resources_detail: dict[str, list[dict]] = {}
     for r in resources:
         resources_by_type[r.resource_type] = resources_by_type.get(r.resource_type, 0) + 1
+        if r.resource_type not in resources_detail:
+            resources_detail[r.resource_type] = []
+        resources_detail[r.resource_type].append({
+            "resource_id": r.resource_id,
+            "region": r.region,
+        })
 
     # Get remediation commands for each finding
     from sofe.remediation.commands import get_remediation_commands
@@ -82,6 +92,7 @@ async def evaluate_endpoint(req: EvaluateRequest):
         "total_estimated_savings": total_savings,
         "failed": failed,
         "resources_by_type": resources_by_type,
+        "resources_detail": resources_detail,
         "findings": [
             {
                 "id": str(uuid.uuid4()),
@@ -101,6 +112,12 @@ async def evaluate_endpoint(req: EvaluateRequest):
             }
             for f in findings
         ],
+        "insights": {
+            "relationships_count": insights.get("relationships_count", 0),
+            "single_points_of_failure": insights.get("single_points_of_failure", []),
+            "blast_radius": insights.get("blast_radius", {}),
+            "team_costs": insights.get("team_costs", {}),
+        },
     }
 
 @app.post("/validate")
