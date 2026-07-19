@@ -83,6 +83,13 @@ async def evaluate_endpoint(req: EvaluateRequest):
     # Get remediation commands for each finding
     from sofe.remediation.commands import get_remediation_commands
 
+    # Build cost lookup map from resources
+    cost_by_resource: dict[str, float] = {}
+    for r in resources:
+        mc = r.metrics.get("monthly_cost")
+        if mc and mc > 0:
+            cost_by_resource[r.resource_id] = mc
+
     return {
         "evaluation_id": str(uuid.uuid4()),
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -90,6 +97,7 @@ async def evaluate_endpoint(req: EvaluateRequest):
         "resources_scanned": len(resources),
         "findings_count": len(findings),
         "total_estimated_savings": total_savings,
+        "total_monthly_cost": round(sum(cost_by_resource.values()), 2),
         "failed": failed,
         "resources_by_type": resources_by_type,
         "resources_detail": resources_detail,
@@ -104,6 +112,7 @@ async def evaluate_endpoint(req: EvaluateRequest):
                 "account_id": f.account_id,
                 "message": f.message,
                 "estimated_savings": f.estimated_savings,
+                "monthly_cost": cost_by_resource.get(f.resource_id),
                 "recommendation": f.recommendation,
                 "remediation_commands": get_remediation_commands(
                     f.policy_name, f.resource_id, f.resource_type, f.region, f.account_id or ""
