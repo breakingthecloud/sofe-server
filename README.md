@@ -1,17 +1,53 @@
-# 🟢 SOFE Server — FinOps Policy Engine API
+<p align="center">
+  <img alt="SOFE Server" src="https://img.shields.io/badge/🟢-SOFE_Server-22C55E?style=for-the-badge" height="50">
+</p>
 
-[![PyPI version](https://img.shields.io/pypi/v/sofe-server?color=blue)](https://pypi.org/project/sofe-server/)
-[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://python.org)
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
+<p align="center">
+  <b>REST API for the SOFE FinOps Engine</b><br>
+  Multi-tenant evaluation platform with catalog, history, and alerts.
+</p>
 
-REST API server for the [SOFE](https://sofe.dev) (Stairway Open FinOps Engine). Wraps the SOFE Python engine in a FastAPI application, enabling HTTP-based evaluations.
+<p align="center">
+  <a href="#quick-start">Quick Start</a>
+  ·
+  <a href="#endpoints">Endpoints</a>
+  ·
+  <a href="#usage">Usage</a>
+  ·
+  <a href="#ecosystem">Ecosystem</a>
+</p>
 
-## Quick Start
+<p align="center">
+  <img src="https://img.shields.io/pypi/v/sofe-server?style=flat-square&logo=pypi&color=22C55E" alt="PyPI">
+  <img src="https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square&logo=python" alt="Python">
+  <img src="https://img.shields.io/badge/license-Apache_2.0-22C55E?style=flat-square" alt="License">
+  <img src="https://img.shields.io/badge/FastAPI-0.115-009688?style=flat-square&logo=fastapi" alt="FastAPI">
+  <img src="https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat-square" alt="PRs">
+</p>
+
+---
+
+Wraps the [SOFE](https://github.com/breakingthecloud/sofe) Python engine in a FastAPI application, enabling HTTP-based evaluations.
 
 ```bash
 pip install sofe sofe-server
 sofe-server
 # → http://localhost:8080
+```
+
+## Quick Start
+
+```bash
+# Install
+pip install sofe sofe-server
+
+# Start server
+sofe-server
+
+# Evaluate your AWS account
+curl -X POST http://localhost:8080/evaluate \
+  -H "Content-Type: application/json" \
+  -d '{"aws_profile": "default"}'
 ```
 
 Or use the Go CLI:
@@ -34,15 +70,7 @@ sofe evaluate # calls localhost:8080/evaluate
 
 ## Usage
 
-### Evaluate your AWS account
-
-```bash
-curl -X POST http://localhost:8080/evaluate \
-  -H "Content-Type: application/json" \
-  -d '{"aws_profile": "default"}'
-```
-
-### With cross-account role
+### Evaluate with cross-account role
 
 ```bash
 curl -X POST http://localhost:8080/evaluate \
@@ -80,7 +108,7 @@ sofe/ (engine — pip install sofe)
 Your AWS Account (read-only)
 ```
 
-sofe-server is a **thin wrapper** — all logic lives in the [sofe engine](https://github.com/breakingthecloud/sofe).
+sofe-server is a **thin wrapper** — all policy evaluation logic lives in the [sofe engine](https://github.com/breakingthecloud/sofe).
 
 ## Requirements
 
@@ -98,7 +126,7 @@ uv pip install -e ".[dev]" -e ../sofe/
 uvicorn sofe_server.app:app --reload --port 8080
 ```
 
-## Related Projects
+## Ecosystem
 
 | Project | Description |
 |---------|-------------|
@@ -110,4 +138,10 @@ uvicorn sofe_server.app:app --reload --port 8080
 
 ## License
 
-Apache 2.0 — see [LICENSE](LICENSE)
+Apache 2.0 — see [LICENSE](LICENSE).
+
+---
+
+<p align="center">
+  <a href="https://sofe.dev">sofe.dev</a> · <a href="https://github.com/breakingthecloud/sofe">Engine</a> · <a href="https://finoptix.dev">finoptix.dev</a>
+</p>
