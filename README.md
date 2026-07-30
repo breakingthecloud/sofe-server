@@ -1,5 +1,9 @@
 # 🟢 SOFE Server — FinOps Policy Engine API
 
+[![PyPI version](https://img.shields.io/pypi/v/sofe-server?color=blue)](https://pypi.org/project/sofe-server/)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://python.org)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
+
 REST API server for the [SOFE](https://sofe.dev) (Stairway Open FinOps Engine). Wraps the SOFE Python engine in a FastAPI application, enabling HTTP-based evaluations.
 
 ## Quick Start
