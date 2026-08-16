@@ -228,3 +228,117 @@ async def test_connection(body: dict):
         return {"success": True, "account_id": account_id}
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"AssumeRole failed: {str(e)}")
+
+
+# --- Bedrock User-Account Invoke (SoW-S059) ---
+
+# Only models that work well with SOFE prompts AND are cost-reasonable.
+ALLOWED_BEDROCK_MODELS = [
+    "anthropic.claude-3-haiku-20240307-v1:0",
+    "anthropic.claude-3-5-sonnet-20241022-v2:0",
+    "amazon.titan-text-express-v1",
+    "amazon.titan-text-premier-v1:0",
+    "meta.llama3-1-70b-instruct-v1:0",
+]
+
+def _build_bedrock_body(model: str, prompt: str, system_prompt: str) -> bytes:
+    """Build the InvokeModel request body for each model family."""
+    import json
+    if model.startswith("anthropic.claude"):
+        body = {
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": 400,
+            "temperature": 0.3,
+            "system": system_prompt,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+    elif model.startswith("amazon.titan"):
+        body = {
+            "inputText": f"{system_prompt}\n\n{prompt}",
+            "textGenerationConfig": {
+                "maxTokenCount": 400,
+                "temperature": 0.3,
+                "topP": 0.9,
+            },
+        }
+    elif model.startswith("meta.llama"):
+        body = {
+            "prompt": f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{system_prompt}<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n{prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>",
+            "max_gen_len": 400,
+            "temperature": 0.3,
+            "top_p": 0.9,
+        }
+    else:
+        raise HTTPException(status_code=400, detail=f"Model {model} not supported")
+    return json.dumps(body).encode("utf-8")
+
+
+def _parse_bedrock_response(model: str, raw: bytes) -> str:
+    """Extract text from InvokeModel response for each model family."""
+    import json
+    data = json.loads(raw)
+    if model.startswith("anthropic.claude"):
+        content = data.get("content", [])
+        return "".join(block.get("text", "") for block in content if isinstance(block, dict))
+    if model.startswith("amazon.titan"):
+        results = data.get("results", [])
+        return results[0].get("outputText", "") if results else ""
+    if model.startswith("meta.llama"):
+        return data.get("generation", "")
+    return ""
+
+
+class BedrockInvokeRequest(BaseModel):
+    role_arn: str
+    external_id: str
+    model: str
+    prompt: str
+    system_prompt: str = ""
+
+
+@app.post("/bedrock/invoke")
+async def bedrock_invoke(req: BedrockInvokeRequest):
+    """AssumeRole in user's account → bedrock:InvokeModel (SoW-S059).
+
+    The role must be the `sofe-ai-invoke` role deployed by the user
+    (sofe-ai-invoke-role.yaml), which allows only bedrock:InvokeModel on
+    the whitelisted models. Costs are billed to the user's AWS account.
+    """
+    import boto3
+
+    if req.model not in ALLOWED_BEDROCK_MODELS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Model {req.model} not in allowed list. Allowed: {', '.join(ALLOWED_BEDROCK_MODELS)}",
+        )
+
+    try:
+        sts = boto3.client("sts")
+        assumed = sts.assume_role(
+            RoleArn=req.role_arn,
+            RoleSessionName="sofe-ai-invoke",
+            ExternalId=req.external_id,
+            DurationSeconds=900,  # 15 min max
+        )
+        creds = assumed["Credentials"]
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"AssumeRole failed: {str(e)}")
+
+    try:
+        client = boto3.client(
+            "bedrock-runtime",
+            aws_access_key_id=creds["AccessKeyId"],
+            aws_secret_access_key=creds["SecretAccessKey"],
+            aws_session_token=creds["SessionToken"],
+        )
+        body = _build_bedrock_body(req.model, req.prompt, req.system_prompt)
+        resp = client.invoke_model(modelId=req.model, body=body, contentType="application/json", accept="application/json")
+        raw = resp["body"].read()
+        text = _parse_bedrock_response(req.model, raw)
+        if not text:
+            raise HTTPException(status_code=502, detail="Bedrock returned empty response")
+        return {"success": True, "text": text, "model": req.model}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Bedrock InvokeModel failed: {str(e)}")
