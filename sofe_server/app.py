@@ -232,14 +232,40 @@ async def test_connection(body: dict):
 
 # --- Bedrock User-Account Invoke (SoW-S059) ---
 
-# Only models that work well with SOFE prompts AND are cost-reasonable.
-ALLOWED_BEDROCK_MODELS = [
-    "anthropic.claude-3-haiku-20240307-v1:0",
-    "anthropic.claude-3-5-sonnet-20241022-v2:0",
-    "amazon.titan-text-express-v1",
-    "amazon.titan-text-premier-v1:0",
-    "meta.llama3-1-70b-instruct-v1:0",
-]
+# --- Bedrock User-Account Invoke (SoW-S059) ---
+
+# Allow by FAMILY (text models only) instead of hardcoded model IDs — Bedrock
+# retires model versions frequently (e.g. claude-3-haiku EOL), so the user's
+# account discovery (ListFoundationModels) drives which models are selectable.
+BEDROCK_TEXT_PREFIXES = (
+    "anthropic.claude",
+    "amazon.titan-text",
+    "amazon.nova",
+    "meta.llama",
+    "mistral.",
+    "cohere.command",
+    "ai21.jamba",
+)
+
+# Block expensive / non-text / retired families that break SOFE prompts or cost too much.
+BEDROCK_BLOCK_PATTERNS = (
+    "opus",           # expensive
+    "image",          # non-text
+    "embed",          # non-text
+    "stability",      # image
+    "titan-image",
+    "titan-video",
+    "nova-canvas",
+    "video",
+    "sonnet-4",       # expensive newer gen (blocked; keep cost predictable)
+    "claude-4",       # expensive newer gen
+)
+
+def _is_allowed_bedrock_model(model: str) -> bool:
+    if not model.startswith(BEDROCK_TEXT_PREFIXES):
+        return False
+    return not any(p in model for p in BEDROCK_BLOCK_PATTERNS)
+
 
 def _build_bedrock_body(model: str, prompt: str, system_prompt: str) -> bytes:
     """Build the InvokeModel request body for each model family."""
@@ -252,7 +278,7 @@ def _build_bedrock_body(model: str, prompt: str, system_prompt: str) -> bytes:
             "system": system_prompt,
             "messages": [{"role": "user", "content": prompt}],
         }
-    elif model.startswith("amazon.titan"):
+    elif model.startswith("amazon.titan-text"):
         body = {
             "inputText": f"{system_prompt}\n\n{prompt}",
             "textGenerationConfig": {
@@ -261,12 +287,40 @@ def _build_bedrock_body(model: str, prompt: str, system_prompt: str) -> bytes:
                 "topP": 0.9,
             },
         }
+    elif model.startswith("amazon.nova"):
+        body = {
+            "system": [{"text": system_prompt}],
+            "messages": [{"role": "user", "content": [{"text": prompt}]}],
+            "inferenceConfig": {"maxNewTokens": 400, "temperature": 0.3, "topP": 0.9},
+        }
     elif model.startswith("meta.llama"):
         body = {
             "prompt": f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{system_prompt}<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n{prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>",
             "max_gen_len": 400,
             "temperature": 0.3,
             "top_p": 0.9,
+        }
+    elif model.startswith("mistral."):
+        body = {
+            "prompt": f"<s>[INST] {system_prompt}\n\n{prompt} [/INST]",
+            "max_tokens": 400,
+            "temperature": 0.3,
+            "top_p": 0.9,
+        }
+    elif model.startswith("cohere.command"):
+        body = {
+            "prompt": f"{system_prompt}\n\n{prompt}",
+            "max_tokens": 400,
+            "temperature": 0.3,
+        }
+    elif model.startswith("ai21.jamba"):
+        body = {
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt},
+            ],
+            "max_tokens": 400,
+            "temperature": 0.3,
         }
     else:
         raise HTTPException(status_code=400, detail=f"Model {model} not supported")
@@ -280,11 +334,21 @@ def _parse_bedrock_response(model: str, raw: bytes) -> str:
     if model.startswith("anthropic.claude"):
         content = data.get("content", [])
         return "".join(block.get("text", "") for block in content if isinstance(block, dict))
-    if model.startswith("amazon.titan"):
+    if model.startswith("amazon.titan-text"):
         results = data.get("results", [])
         return results[0].get("outputText", "") if results else ""
+    if model.startswith("amazon.nova"):
+        out = data.get("output", {})
+        return out.get("message", {}).get("content", [{}])[0].get("text", "")
     if model.startswith("meta.llama"):
         return data.get("generation", "")
+    if model.startswith("mistral."):
+        outputs = data.get("outputs", [])
+        return outputs[0].get("text", "") if outputs else ""
+    if model.startswith("cohere.command"):
+        return data.get("text", "")
+    if model.startswith("ai21.jamba"):
+        return data.get("text", "")
     return ""
 
 
@@ -296,41 +360,81 @@ class BedrockInvokeRequest(BaseModel):
     system_prompt: str = ""
 
 
+class BedrockListModelsRequest(BaseModel):
+    role_arn: str
+    external_id: str
+
+
+def _bedrock_client_with_role(role_arn: str, external_id: str, service: str = "bedrock"):
+    """AssumeRole in user's account and return a boto3 client for the given service."""
+    import boto3
+    sts = boto3.client("sts")
+    assumed = sts.assume_role(
+        RoleArn=role_arn,
+        RoleSessionName="sofe-ai-invoke",
+        ExternalId=external_id,
+        DurationSeconds=900,  # 15 min max
+    )
+    creds = assumed["Credentials"]
+    return boto3.client(
+        service,
+        aws_access_key_id=creds["AccessKeyId"],
+        aws_secret_access_key=creds["SecretAccessKey"],
+        aws_session_token=creds["SessionToken"],
+    )
+
+
+@app.post("/bedrock/models")
+async def bedrock_list_models(req: BedrockListModelsRequest):
+    """List text foundation models available in the user's account (discovery, SoW-S059).
+
+    Uses ListFoundationModels through the sofe-ai-invoke role. Returns only
+    text-capable models in allowed families, excluding expensive/retired ones.
+    """
+    try:
+        client = _bedrock_client_with_role(req.role_arn, req.external_id)
+        resp = client.list_foundation_models()
+        summaries = resp.get("modelSummaries", [])
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"ListFoundationModels failed: {str(e)}")
+
+    models = []
+    for m in summaries:
+        model_id = m.get("modelId", "")
+        if not _is_allowed_bedrock_model(model_id):
+            continue
+        modalities = m.get("outputModalities") or []
+        if "TEXT" not in modalities:
+            continue
+        lifecycle = (m.get("modelLifecycle") or {}).get("status", "ACTIVE")
+        models.append({
+            "id": model_id,
+            "name": m.get("modelName", model_id),
+            "provider": m.get("providerName", ""),
+            "status": lifecycle,  # ACTIVE | LEGACY | DEPRECATED
+        })
+
+    models.sort(key=lambda x: (x["provider"], x["id"]))
+    return {"success": True, "models": models, "total": len(models)}
+
+
 @app.post("/bedrock/invoke")
 async def bedrock_invoke(req: BedrockInvokeRequest):
     """AssumeRole in user's account → bedrock:InvokeModel (SoW-S059).
 
     The role must be the `sofe-ai-invoke` role deployed by the user
-    (sofe-ai-invoke-role.yaml), which allows only bedrock:InvokeModel on
-    the whitelisted models. Costs are billed to the user's AWS account.
+    (sofe-ai-invoke-role.yaml). Costs are billed to the user's AWS account.
     """
-    import boto3
-
-    if req.model not in ALLOWED_BEDROCK_MODELS:
+    if not _is_allowed_bedrock_model(req.model):
         raise HTTPException(
             status_code=400,
-            detail=f"Model {req.model} not in allowed list. Allowed: {', '.join(ALLOWED_BEDROCK_MODELS)}",
+            detail=f"Model {req.model} not allowed. SOFE only allows text models in families: {', '.join(BEDROCK_TEXT_PREFIXES)}",
         )
 
     try:
-        sts = boto3.client("sts")
-        assumed = sts.assume_role(
-            RoleArn=req.role_arn,
-            RoleSessionName="sofe-ai-invoke",
-            ExternalId=req.external_id,
-            DurationSeconds=900,  # 15 min max
-        )
-        creds = assumed["Credentials"]
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"AssumeRole failed: {str(e)}")
-
-    try:
-        client = boto3.client(
-            "bedrock-runtime",
-            aws_access_key_id=creds["AccessKeyId"],
-            aws_secret_access_key=creds["SecretAccessKey"],
-            aws_session_token=creds["SessionToken"],
-        )
+        client = _bedrock_client_with_role(req.role_arn, req.external_id, service="bedrock-runtime")
         body = _build_bedrock_body(req.model, req.prompt, req.system_prompt)
         resp = client.invoke_model(modelId=req.model, body=body, contentType="application/json", accept="application/json")
         raw = resp["body"].read()
