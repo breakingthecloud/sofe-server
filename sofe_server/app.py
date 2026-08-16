@@ -249,7 +249,7 @@ BEDROCK_TEXT_PREFIXES = (
 
 # Block expensive / non-text / retired families that break SOFE prompts or cost too much.
 BEDROCK_BLOCK_PATTERNS = (
-    "opus",           # expensive
+    "opus",           # expensive (5-10x sonnet)
     "image",          # non-text
     "embed",          # non-text
     "stability",      # image
@@ -257,19 +257,32 @@ BEDROCK_BLOCK_PATTERNS = (
     "titan-video",
     "nova-canvas",
     "video",
-    "sonnet-4",       # expensive newer gen (blocked; keep cost predictable)
-    "claude-4",       # expensive newer gen
 )
 
 def _is_allowed_bedrock_model(model: str) -> bool:
-    if not model.startswith(BEDROCK_TEXT_PREFIXES):
+    # Normalize: us./global. prefixes are inference profiles (Anthropic gen 4+)
+    normalized = model
+    for prefix in ("us.", "global."):
+        if model.startswith(prefix):
+            normalized = model[len(prefix):]
+            break
+    if not normalized.startswith(BEDROCK_TEXT_PREFIXES):
         return False
-    return not any(p in model for p in BEDROCK_BLOCK_PATTERNS)
+    return not any(p in normalized for p in BEDROCK_BLOCK_PATTERNS)
+
+
+def _normalize_bedrock_model(model: str) -> str:
+    """Strip us./global. inference-profile prefixes for family detection."""
+    for prefix in ("us.", "global."):
+        if model.startswith(prefix):
+            return model[len(prefix):]
+    return model
 
 
 def _build_bedrock_body(model: str, prompt: str, system_prompt: str) -> bytes:
     """Build the InvokeModel request body for each model family."""
     import json
+    model = _normalize_bedrock_model(model)
     if model.startswith("anthropic.claude"):
         body = {
             "anthropic_version": "bedrock-2023-05-31",
@@ -331,6 +344,7 @@ def _parse_bedrock_response(model: str, raw: bytes) -> str:
     """Extract text from InvokeModel response for each model family."""
     import json
     data = json.loads(raw)
+    model = _normalize_bedrock_model(model)
     if model.startswith("anthropic.claude"):
         content = data.get("content", [])
         return "".join(block.get("text", "") for block in content if isinstance(block, dict))
@@ -409,6 +423,8 @@ async def bedrock_list_models(req: BedrockListModelsRequest):
         if "TEXT" not in modalities:
             continue
         lifecycle = (m.get("modelLifecycle") or {}).get("status", "ACTIVE")
+        # Anthropic gen 4+ can only be invoked via an inference profile (us.<model>).
+        # Keep the raw ID for display but the invoke path auto-retries with the us. prefix.
         models.append({
             "id": model_id,
             "name": m.get("modelName", model_id),
@@ -435,13 +451,30 @@ async def bedrock_invoke(req: BedrockInvokeRequest):
 
     try:
         client = _bedrock_client_with_role(req.role_arn, req.external_id, service="bedrock-runtime")
-        body = _build_bedrock_body(req.model, req.prompt, req.system_prompt)
-        resp = client.invoke_model(modelId=req.model, body=body, contentType="application/json", accept="application/json")
-        raw = resp["body"].read()
-        text = _parse_bedrock_response(req.model, raw)
-        if not text:
-            raise HTTPException(status_code=502, detail="Bedrock returned empty response")
-        return {"success": True, "text": text, "model": req.model}
+        # Anthropic gen 4+ models require an inference profile (us.<model>), not the raw model ID.
+        # Try direct first; on ValidationException suggesting a profile, retry with the us. prefix.
+        candidates = [req.model]
+        if req.model.startswith("anthropic.claude"):
+            candidates.append(f"us.{req.model}")
+
+        last_err: Exception | None = None
+        for model_id in candidates:
+            try:
+                body = _build_bedrock_body(model_id, req.prompt, req.system_prompt)
+                resp = client.invoke_model(modelId=model_id, body=body, contentType="application/json", accept="application/json")
+                raw = resp["body"].read()
+                text = _parse_bedrock_response(model_id, raw)
+                if not text:
+                    raise HTTPException(status_code=502, detail="Bedrock returned empty response")
+                return {"success": True, "text": text, "model": model_id}
+            except HTTPException:
+                raise
+            except Exception as e:
+                last_err = e
+                if "inference profile" not in str(e).lower() and "inference profile" not in str(e).lower():
+                    # Non-profile error — don't retry with the profile prefix unless it's specifically about profiles
+                    break
+        raise HTTPException(status_code=400, detail=f"Bedrock InvokeModel failed: {last_err}")
     except HTTPException:
         raise
     except Exception as e:
