@@ -62,7 +62,7 @@ sofe evaluate # calls localhost:8080/evaluate
 |--------|------|-------------|
 | GET | `/health` | Health check |
 | POST | `/evaluate` | Evaluate AWS account against policies |
-| POST | `/validate` | Validate a BYaML YAML file |
+| POST | `/validate` | Validate an Architecture Graph (BYaML v0.4 JSON) |
 | GET | `/policies` | List all loaded policies |
 | GET | `/collectors` | List available collectors |
 | GET | `/metrics` | List metrics per collector |
