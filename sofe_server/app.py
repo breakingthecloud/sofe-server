@@ -90,6 +90,14 @@ async def evaluate_endpoint(req: EvaluateRequest):
         if mc and mc > 0:
             cost_by_resource[r.resource_id] = mc
 
+    # S083 — account-level savings metrics (from synthetic aws.account resource)
+    account_metrics: dict = {}
+    for r in resources:
+        if r.resource_type == "aws.account":
+            account_metrics = dict(r.metrics)
+            break
+    account_metrics.setdefault("potential_savings_monthly", insights.get("potential_savings_monthly", 0))
+
     return {
         "evaluation_id": str(uuid.uuid4()),
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -98,6 +106,7 @@ async def evaluate_endpoint(req: EvaluateRequest):
         "findings_count": len(findings),
         "total_estimated_savings": total_savings,
         "total_monthly_cost": round(sum(cost_by_resource.values()), 2),
+        "account_metrics": account_metrics,
         "failed": failed,
         "resources_by_type": resources_by_type,
         "resources_detail": resources_detail,
