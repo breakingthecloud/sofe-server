@@ -1,9 +1,11 @@
 from __future__ import annotations
+import os
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from sofe.loader import load_policies, validate_policies
@@ -28,11 +30,41 @@ class EvaluateRequest(BaseModel):
 class ValidateRequest(BaseModel):
     policy_yaml: str
 
-# --- Auth (optional) ---
+# --- Auth ---
+#
+# Hosted deployments MUST set at least one of:
+#   SOFE_API_KEY           - bearer-style key for direct API clients
+#   SOFE_INTERNAL_SECRET   - shared secret used by the Cloudflare Workers
+#                            (sent as `x-sofe-internal-secret`)
+# Requests without a valid secret are rejected. If neither env var is set the
+# server runs in open "local mode" (fine for `localhost`, never for the
+# internet) and logs a warning on startup.
 
-def check_api_key(x_api_key: Optional[str] = Header(None)):
-    # Local mode: no key required. Hosted mode: validate key (future).
-    pass
+SOFE_API_KEY = os.environ.get("SOFE_API_KEY", "")
+SOFE_INTERNAL_SECRET = os.environ.get("SOFE_INTERNAL_SECRET", "")
+
+
+def _authorized(x_api_key: Optional[str], x_internal: Optional[str]) -> bool:
+    if SOFE_INTERNAL_SECRET and x_internal == SOFE_INTERNAL_SECRET:
+        return True
+    if SOFE_API_KEY and x_api_key == SOFE_API_KEY:
+        return True
+    # Local mode: no secrets configured — open access for self-hosted dev.
+    if not SOFE_API_KEY and not SOFE_INTERNAL_SECRET:
+        return True
+    return False
+
+
+@app.middleware("http")
+async def require_auth(request: Request, call_next):
+    if request.url.path == "/health":
+        return await call_next(request)
+    if not _authorized(
+        request.headers.get("x-api-key"),
+        request.headers.get("x-sofe-internal-secret"),
+    ):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    return await call_next(request)
 
 # --- Routes ---
 
@@ -215,16 +247,25 @@ def _get_collector_metrics(resource_type: str) -> list[str]:
     return metrics_map.get(resource_type, ["monthly_cost"])
 
 
+def _validate_role_arn(role_arn: str) -> None:
+    """Only allow AWS IAM role ARNs (prevents abuse of the STS proxy)."""
+    if not isinstance(role_arn, str) or not role_arn.startswith("arn:aws:iam::"):
+        raise HTTPException(status_code=400, detail="role_arn must be an AWS IAM role ARN")
+    if "/" not in role_arn.split("arn:aws:iam::")[1]:
+        raise HTTPException(status_code=400, detail="role_arn must be a role ARN (arn:aws:iam::ACCOUNT:role/NAME)")
+
+
 @app.post("/connect/test")
 async def test_connection(body: dict):
     """Test STS AssumeRole — verifies the user's IAM role works."""
     import boto3
     role_arn = body.get("role_arn")
     external_id = body.get("external_id")
-    
+
     if not role_arn or not external_id:
         raise HTTPException(status_code=400, detail="role_arn and external_id required")
-    
+    _validate_role_arn(role_arn)
+
     try:
         sts = boto3.client("sts")
         resp = sts.assume_role(
@@ -414,6 +455,7 @@ async def bedrock_list_models(req: BedrockListModelsRequest):
     Uses ListFoundationModels through the sofe-ai-invoke role. Returns only
     text-capable models in allowed families, excluding expensive/retired ones.
     """
+    _validate_role_arn(req.role_arn)
     try:
         client = _bedrock_client_with_role(req.role_arn, req.external_id)
         resp = client.list_foundation_models()
@@ -457,6 +499,7 @@ async def bedrock_invoke(req: BedrockInvokeRequest):
             status_code=400,
             detail=f"Model {req.model} not allowed. SOFE only allows text models in families: {', '.join(BEDROCK_TEXT_PREFIXES)}",
         )
+    _validate_role_arn(req.role_arn)
 
     try:
         client = _bedrock_client_with_role(req.role_arn, req.external_id, service="bedrock-runtime")
