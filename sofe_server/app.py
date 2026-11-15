@@ -74,6 +74,11 @@ def _matches(candidate: Optional[str], secret: str) -> bool:
     return hmac.compare_digest(candidate.encode("utf-8"), secret.encode("utf-8"))
 
 
+def _used_previous_secret(x_internal: Optional[str]) -> bool:
+    """True when the request authenticates ONLY with the previous (rotating-out) secret."""
+    return _matches(x_internal, SOFE_INTERNAL_SECRET_PREVIOUS) and not _matches(x_internal, SOFE_INTERNAL_SECRET)
+
+
 def _authorized(x_api_key: Optional[str], x_internal: Optional[str]) -> bool:
     secrets = _internal_secrets()
     if any(_matches(x_internal, secret) for secret in secrets):
@@ -96,6 +101,10 @@ async def require_auth(request: Request, call_next):
         request.headers.get("x-sofe-internal-secret"),
     ):
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    if _used_previous_secret(request.headers.get("x-sofe-internal-secret")):
+        # Rotation monitor: while any caller still logs this line, the previous secret must not be removed.
+        # Never log the value.
+        print(f"auth: previous internal secret used path={request.url.path}", file=sys.stderr, flush=True)
     return await call_next(request)
 
 # --- Routes ---

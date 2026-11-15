@@ -119,3 +119,32 @@ def test_secrets_are_compared_in_constant_time():
     source = inspect.getsource(appmod)
     assert "compare_digest" in source
     assert "x_internal == SOFE_INTERNAL_SECRET" not in source
+
+
+# --- rotation monitor -----------------------------------------------------------------------------
+
+
+def test_using_the_previous_secret_is_logged_without_the_value(secrets, capsys):
+    client = secrets(current=NEW, previous=OLD)
+    status(client, OLD)
+    err = capsys.readouterr().err
+    assert "previous internal secret used" in err
+    assert OLD not in err and NEW not in err
+
+
+def test_using_the_current_secret_logs_nothing(secrets, capsys):
+    client = secrets(current=NEW, previous=OLD)
+    status(client, NEW)
+    assert "previous internal secret used" not in capsys.readouterr().err
+
+
+def test_a_rejected_request_does_not_log_the_previous_marker(secrets, capsys):
+    client = secrets(current=NEW, previous=OLD)
+    status(client, "wrong")
+    assert "previous internal secret used" not in capsys.readouterr().err
+
+
+def test_when_both_secrets_are_equal_it_counts_as_current(secrets, capsys):
+    client = secrets(current=NEW, previous=NEW)
+    status(client, NEW)
+    assert "previous internal secret used" not in capsys.readouterr().err
