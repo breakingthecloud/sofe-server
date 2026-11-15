@@ -1,11 +1,12 @@
 from __future__ import annotations
+import hmac
 import inspect
 import os
 import re
 import sys
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
+from typing import List, Optional
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
@@ -50,18 +51,43 @@ class ValidateRequest(BaseModel):
 # Requests without a valid secret are rejected. If neither env var is set the
 # server runs in open "local mode" (fine for `localhost`, never for the
 # internet) and logs a warning on startup.
+#
+# Rotating the internal secret without downtime: set SOFE_INTERNAL_SECRET to the new
+# value and SOFE_INTERNAL_SECRET_PREVIOUS to the old one, switch the Workers to the
+# new value, then remove SOFE_INTERNAL_SECRET_PREVIOUS. While both are set either is
+# accepted. PREVIOUS only ever ADDS an accepted value; it never opens the server.
 
 SOFE_API_KEY = os.environ.get("SOFE_API_KEY", "")
 SOFE_INTERNAL_SECRET = os.environ.get("SOFE_INTERNAL_SECRET", "")
+SOFE_INTERNAL_SECRET_PREVIOUS = os.environ.get("SOFE_INTERNAL_SECRET_PREVIOUS", "")
+
+
+def _internal_secrets() -> List[str]:
+    """Internal secrets currently accepted (empty values are not secrets)."""
+    return [v for v in (SOFE_INTERNAL_SECRET, SOFE_INTERNAL_SECRET_PREVIOUS) if v]
+
+
+def _matches(candidate: Optional[str], secret: str) -> bool:
+    """Constant-time comparison; an empty candidate or secret never matches."""
+    if not candidate or not secret:
+        return False
+    return hmac.compare_digest(candidate.encode("utf-8"), secret.encode("utf-8"))
+
+
+def _used_previous_secret(x_internal: Optional[str]) -> bool:
+    """True when the request authenticates ONLY with the previous (rotating-out) secret."""
+    return _matches(x_internal, SOFE_INTERNAL_SECRET_PREVIOUS) and not _matches(x_internal, SOFE_INTERNAL_SECRET)
 
 
 def _authorized(x_api_key: Optional[str], x_internal: Optional[str]) -> bool:
-    if SOFE_INTERNAL_SECRET and x_internal == SOFE_INTERNAL_SECRET:
+    secrets = _internal_secrets()
+    if any(_matches(x_internal, secret) for secret in secrets):
         return True
-    if SOFE_API_KEY and x_api_key == SOFE_API_KEY:
+    if SOFE_API_KEY and _matches(x_api_key, SOFE_API_KEY):
         return True
-    # Local mode: no secrets configured — open access for self-hosted dev.
-    if not SOFE_API_KEY and not SOFE_INTERNAL_SECRET:
+    # Local mode: no secrets configured at all — open access for self-hosted dev.
+    # A configured PREVIOUS secret counts as configured: a half-finished rotation stays closed.
+    if not SOFE_API_KEY and not secrets:
         return True
     return False
 
@@ -75,6 +101,10 @@ async def require_auth(request: Request, call_next):
         request.headers.get("x-sofe-internal-secret"),
     ):
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    if _used_previous_secret(request.headers.get("x-sofe-internal-secret")):
+        # Rotation monitor: while any caller still logs this line, the previous secret must not be removed.
+        # Never log the value.
+        print(f"auth: previous internal secret used path={request.url.path}", file=sys.stderr, flush=True)
     return await call_next(request)
 
 # --- Routes ---
