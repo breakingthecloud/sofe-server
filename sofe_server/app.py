@@ -157,6 +157,36 @@ def _assume_role_session(role_arn: str, external_id: str) -> boto3.Session:
     )
 
 
+# --- Cost status (S111 Phase B) ---------------------------------------------
+#
+# The engine reports WHY there is (or is not) per-resource cost data, on the
+# synthetic `aws.account` resource. Clients (platform, CLI) use it instead of
+# guessing from `estimated_savings`.
+#   cost_status          ok | partial | access_denied | not_enabled | no_data | error | unknown
+#   cost_detail          short, ARN-free reason
+#   cost_coverage        matched resources / inventoried resources
+#   cost_coverage_usd    matched spend / the account's Cost Explorer spend
+#   cost_account_monthly Cost Explorer monthly spend of the evaluated account (7-day sample x 30/7)
+#   cost_matched_monthly the part of it attributed to inventoried resources (== total_monthly_cost)
+# A resource with no Cost Explorer match has monthly_cost = null: UNKNOWN, never 0 or a share.
+_COST_FIELDS = (
+    "cost_status", "cost_detail", "cost_coverage", "cost_coverage_usd",
+    "cost_account_monthly", "cost_matched_monthly",
+)
+
+
+def _cost_summary(resources) -> dict:
+    """Cost fields for the response; `unknown` when the engine predates S111 Phase B."""
+    for r in resources:
+        if r.resource_type == "aws.account" and "cost_status" in (r.properties or {}):
+            return {k: r.properties.get(k) for k in _COST_FIELDS}
+    return {
+        "cost_status": "unknown",
+        "cost_detail": "the evaluation engine does not report cost status",
+        **{k: None for k in _COST_FIELDS if k not in ("cost_status", "cost_detail")},
+    }
+
+
 @app.post("/evaluate")
 async def evaluate_endpoint(req: EvaluateRequest):
     _check_credential_source(req)  # 400/501 before anything else; no AWS call yet
@@ -243,6 +273,7 @@ async def evaluate_endpoint(req: EvaluateRequest):
         "findings_count": len(findings),
         "total_estimated_savings": total_savings,
         "total_monthly_cost": round(sum(cost_by_resource.values()), 2),
+        **_cost_summary(resources),
         "account_metrics": account_metrics,
         "failed": failed,
         "resources_by_type": resources_by_type,
