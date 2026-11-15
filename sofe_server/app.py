@@ -1,9 +1,14 @@
 from __future__ import annotations
+import inspect
 import os
+import re
+import sys
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
+import boto3
+from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -22,7 +27,13 @@ app = FastAPI(
 
 class EvaluateRequest(BaseModel):
     policies_dir: str = "./policies"
+    # Credential source — exactly one applies, in this order of precedence:
+    #   role_arn (+ external_id): assume the role and evaluate THAT account (S111).
+    #   profile:                  a named local AWS profile (self-hosted).
+    #   neither:                  the server's own default credentials.
     profile: Optional[str] = None
+    role_arn: Optional[str] = None
+    external_id: Optional[str] = None
     resource_types: Optional[list[str]] = None
     regions: Optional[list[str]] = None
     fail_on: Optional[str] = None
@@ -72,17 +83,108 @@ async def require_auth(request: Request, call_next):
 async def health():
     return {"status": "ok", "version": "0.1.0"}
 
+# --- Role-based evaluation (S111) ---
+#
+# Hosted deployments evaluate a CUSTOMER's account: the caller passes the
+# customer's role_arn + external_id, we AssumeRole and run every collector with
+# those temporary credentials. Without this, boto3 would silently fall back to
+# the host's own credentials and evaluate the host's account instead.
+#
+# Self-hosted/OSS keeps working unchanged: no role_arn => `profile` or the
+# default credential chain, exactly as before. Hosted servers set
+# SOFE_REQUIRE_ROLE=true so a request that names no role is rejected instead of
+# reading the host's own account.
+
+_EXTERNAL_ID_RE = re.compile(r"^[\w+=,.@:/-]{2,1224}$", re.ASCII)  # STS ExternalId constraints
+_ASSUME_SESSION_NAME = "sofe-evaluate"
+_ASSUME_SESSION_SECONDS = 900  # evaluations take seconds; keep the exposure window minimal
+_ENGINE_SUPPORTS_SESSION = "session" in inspect.signature(collect_all).parameters
+
+
+def _role_required() -> bool:
+    """True on hosted servers (SOFE_REQUIRE_ROLE=true): every evaluation must name a customer role."""
+    return os.environ.get("SOFE_REQUIRE_ROLE", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _check_credential_source(req: "EvaluateRequest") -> None:
+    """Validate how the request selects credentials. Touches no AWS API."""
+    if req.role_arn:
+        if not req.external_id:
+            raise HTTPException(status_code=400, detail="external_id is required when role_arn is provided")
+        if not _EXTERNAL_ID_RE.match(req.external_id):
+            raise HTTPException(status_code=400, detail="external_id has an invalid format")
+        _validate_role_arn(req.role_arn)
+        if not _ENGINE_SUPPORTS_SESSION:
+            raise HTTPException(
+                status_code=501,
+                detail="The installed 'sofe' engine does not support role-based evaluation; upgrade the 'sofe' package",
+            )
+    elif req.external_id:
+        raise HTTPException(status_code=400, detail="role_arn is required when external_id is provided")
+    elif _role_required():
+        raise HTTPException(status_code=400, detail="role_arn and external_id are required on this server")
+
+
+def _assume_role_session(role_arn: str, external_id: str) -> boto3.Session:
+    """AssumeRole into the customer's account; return a session bound to the temporary credentials.
+
+    Error bodies never echo the ExternalId.
+    """
+    try:
+        creds = boto3.client("sts").assume_role(
+            RoleArn=role_arn,
+            RoleSessionName=_ASSUME_SESSION_NAME,
+            ExternalId=external_id,
+            DurationSeconds=_ASSUME_SESSION_SECONDS,
+        )["Credentials"]
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        if code in ("AccessDenied", "AccessDeniedException"):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Could not assume the role. Check that it exists in the target account and that the "
+                    "ExternalId in its trust policy matches the one shown in your SOFE account page."
+                ),
+            )
+        raise HTTPException(status_code=502, detail=f"AssumeRole failed ({code or 'ClientError'})")
+    except BotoCoreError:
+        raise HTTPException(status_code=502, detail="AssumeRole failed (could not reach STS)")
+    return boto3.Session(
+        aws_access_key_id=creds["AccessKeyId"],
+        aws_secret_access_key=creds["SecretAccessKey"],
+        aws_session_token=creds["SessionToken"],
+    )
+
+
 @app.post("/evaluate")
 async def evaluate_endpoint(req: EvaluateRequest):
+    _check_credential_source(req)  # 400/501 before anything else; no AWS call yet
+
     policies = load_policies(req.policies_dir)
     if not policies:
         raise HTTPException(status_code=422, detail="No policies found")
 
-    resources = collect_all(
-        profile=req.profile,
-        resource_types=req.resource_types,
-        regions=req.regions,
-    )
+    if req.role_arn:
+        session = _assume_role_session(req.role_arn, req.external_id)
+        evaluated_via = "assumed_role"
+        resources = collect_all(
+            resource_types=req.resource_types,
+            regions=req.regions,
+            session=session,  # `profile` is ignored when a role is given
+        )
+    else:
+        evaluated_via = "profile" if req.profile else "default_credentials"
+        resources = collect_all(
+            profile=req.profile,
+            resource_types=req.resource_types,
+            regions=req.regions,
+        )
+
+    # Which account was actually read (from the synthetic account resource).
+    account_id = next((r.account_id for r in resources if r.resource_type == "aws.account"), None)
+    # One log line, never the ExternalId.
+    print(f"evaluating account={account_id} via={evaluated_via} role={req.role_arn or '-'}", file=sys.stderr, flush=True)
 
     # Architecture-aware evaluation (includes cross-resource analysis)
     arch_result = evaluate_architecture(policies, resources)
@@ -134,6 +236,9 @@ async def evaluate_endpoint(req: EvaluateRequest):
         "evaluation_id": str(uuid.uuid4()),
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "policies_evaluated": len(policies),
+        "account_id": account_id,
+        "evaluated_via": evaluated_via,
+        "evaluated_role_arn": req.role_arn,
         "resources_scanned": len(resources),
         "findings_count": len(findings),
         "total_estimated_savings": total_savings,

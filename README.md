@@ -47,7 +47,7 @@ sofe-server
 # Evaluate your AWS account
 curl -X POST http://localhost:8080/evaluate \
   -H "Content-Type: application/json" \
-  -d '{"aws_profile": "default"}'
+  -d '{"profile": "default"}'
 ```
 
 Or use the Go CLI:
@@ -70,16 +70,50 @@ sofe evaluate # calls localhost:8080/evaluate
 
 ## Usage
 
-### Evaluate with cross-account role
+### Evaluate a different AWS account (cross-account role)
+
+Pass the role to assume and its ExternalId. The server calls `sts:AssumeRole` and runs
+**every** collector with those temporary credentials, so the account behind the role is
+the one that gets evaluated:
 
 ```bash
 curl -X POST http://localhost:8080/evaluate \
   -H "Content-Type: application/json" \
   -d '{
-    "role_arn": "arn:aws:iam::123456789012:role/SOFEReadOnlyRole",
-    "external_id": "sofe-abc123"
+    "role_arn": "arn:aws:iam::123456789012:role/sofe-read-only",
+    "external_id": "your-external-id"
   }'
 ```
+
+| Field | Notes |
+|-------|-------|
+| `role_arn` | IAM role ARN to assume. Takes precedence over `profile`. |
+| `external_id` | Required with `role_arn` (2-1224 chars: letters, digits, `+=,.@:/-`). |
+
+The response says what was actually read: `account_id`, `evaluated_via`
+(`assumed_role` \| `profile` \| `default_credentials`) and `evaluated_role_arn`.
+
+| Status | Meaning |
+|--------|---------|
+| `400` | Missing/invalid `role_arn` or `external_id`, or a role is required (see below). No AWS call is made. |
+| `403` | STS denied the assume: the role does not exist in that account or its trust policy ExternalId does not match. |
+| `502` | STS failed for another reason. |
+| `501` | The installed `sofe` engine is too old for role-based evaluation (upgrade `sofe`). |
+
+The ExternalId is never echoed in responses or logs.
+
+### Hosted deployments: require a role
+
+By default, a request without `role_arn` evaluates the account of the server's own
+credentials (or `profile`) — the right behavior for self-hosted use. A **hosted** server
+that evaluates *other people's* accounts must never do that. Set:
+
+```bash
+SOFE_REQUIRE_ROLE=true
+```
+
+and any `/evaluate` request that does not name a role is rejected with `400` before any
+AWS API is called.
 
 ### List policies
 
@@ -124,6 +158,9 @@ cd sofe-server
 uv venv && source .venv/bin/activate
 uv pip install -e ".[dev]" -e ../sofe/
 uvicorn sofe_server.app:app --reload --port 8080
+
+# Tests (no AWS needed: STS and the engine are faked)
+pytest
 ```
 
 ## Ecosystem
