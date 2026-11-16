@@ -114,7 +114,7 @@ async def require_auth(request: Request, call_next):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "0.1.0"}
+    return {"status": "ok", "version": "0.4.0"}
 
 # --- Role-based evaluation (S111) ---
 #
