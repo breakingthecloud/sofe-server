@@ -67,6 +67,10 @@ sofe evaluate # calls localhost:8080/evaluate
 | GET | `/collectors` | List available collectors |
 | GET | `/metrics` | List metrics per collector |
 | POST | `/connect/test` | Test STS AssumeRole connection |
+| POST | `/billing/query` | Cost Explorer query through the customer role |
+| POST | `/billing/organization` | Organization accounts and OU paths |
+| POST | `/billing/dimensions` | Cost Explorer dimensions/tags |
+| POST | `/billing/resources` | Resource-level costs (last 14 days) |
 
 ## Usage
 
@@ -114,6 +118,30 @@ SOFE_REQUIRE_ROLE=true
 
 and any `/evaluate` request that does not name a role is rejected with `400` before any
 AWS API is called.
+
+### Billing (S116)
+
+All `/billing/*` endpoints require `role_arn` + `external_id`; the server assumes
+the customer's `sofe-read-only` role with `RoleSessionName=sofe-billing` and never
+uses its own Cost Explorer permissions. Amounts are returned as USD decimal
+strings and every result includes `cost_status` (`ok`, `partial`, `access_denied`,
+`not_enabled`, `no_data`, `error`). The frozen contract is in
+`sofe-platform/docs/billing-contract-v1.schema.json`.
+
+```bash
+curl -X POST http://localhost:8080/billing/query \
+  -H "x-sofe-internal-secret: $SOFE_INTERNAL_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "role_arn": "arn:aws:iam::111111111111:role/sofe-read-only",
+    "external_id": "external-id-from-sofe",
+    "from": "2026-10-01",
+    "to": "2026-11-01",
+    "granularity": "monthly",
+    "metric": "unblended",
+    "group_by": [{"Type": "DIMENSION", "Key": "SERVICE"}]
+  }'
+```
 
 ### List policies
 

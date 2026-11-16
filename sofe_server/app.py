@@ -18,11 +18,14 @@ from sofe.loader import load_policies, validate_policies
 from sofe.collectors import collect_all
 from sofe.engine import evaluate, evaluate_architecture
 
+from .billing import router as billing_router
+
 app = FastAPI(
     title="SOFE API",
-    version="0.1.0",
+    version="0.4.0",
     description="Stairway Open FinOps Engine — FinOps Policies as Code",
 )
+app.include_router(billing_router)
 
 # --- Models ---
 
@@ -155,15 +158,21 @@ def _check_credential_source(req: "EvaluateRequest") -> None:
         raise HTTPException(status_code=400, detail="role_arn and external_id are required on this server")
 
 
-def _assume_role_session(role_arn: str, external_id: str) -> boto3.Session:
+def _assume_role_session(
+    role_arn: str,
+    external_id: str,
+    *,
+    session_name: str = _ASSUME_SESSION_NAME,
+) -> boto3.Session:
     """AssumeRole into the customer's account; return a session bound to the temporary credentials.
 
-    Error bodies never echo the ExternalId.
+    Error bodies never echo the ExternalId. Billing uses ``session_name="sofe-billing"``
+    so CloudTrail distinguishes analytical queries from evaluations.
     """
     try:
         creds = boto3.client("sts").assume_role(
             RoleArn=role_arn,
-            RoleSessionName=_ASSUME_SESSION_NAME,
+            RoleSessionName=session_name,
             ExternalId=external_id,
             DurationSeconds=_ASSUME_SESSION_SECONDS,
         )["Credentials"]
