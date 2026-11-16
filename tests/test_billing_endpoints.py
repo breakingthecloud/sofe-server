@@ -17,6 +17,7 @@ def page(rows: dict[str, str], token: str | None = None) -> dict:
     payload = {
         "ResultsByTime": [
             {
+                "TimePeriod": {"Start": "2026-10-01", "End": "2026-11-01"},
                 "Groups": [
                     {"Keys": [key], "Metrics": {"UnblendedCost": {"Amount": amount, "Unit": "USD"}}}
                     for key, amount in rows.items()
@@ -137,7 +138,9 @@ def test_query_assumes_billing_session_and_returns_cents_as_decimal(assume, clie
     payload = r.json()
     assert payload["cost_status"] == "ok"
     assert payload["total"] == "12.34"
-    assert payload["groups"] == [{"keys": ["Amazon EC2"], "amount": "12.34", "unit": "USD"}]
+    assert payload["groups"] == [
+        {"keys": ["Amazon EC2"], "amount": "12.34", "unit": "USD", "period": "2026-10-01"}
+    ]
     ce_call = session.ce.calls[0]
     assert ce_call[0] == "get_cost_and_usage"
     assert ce_call[1]["GroupBy"] == [{"Type": "DIMENSION", "Key": "SERVICE"}]

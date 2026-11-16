@@ -146,7 +146,12 @@ def _result_body(result, query: CostQuery) -> dict[str, Any]:
         "granularity": query.granularity.value,
         "metric": query.metric.value,
         "groups": [
-            {"keys": group.keys, "amount": _amount(group.amount_cents), "unit": group.unit}
+            {
+                "keys": group.keys,
+                "amount": _amount(group.amount_cents),
+                "unit": group.unit,
+                "period": group.period,
+            }
             for group in result.groups
         ],
         "total": _amount(result.total_cents),
