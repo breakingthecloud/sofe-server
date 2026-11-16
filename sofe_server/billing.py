@@ -8,13 +8,14 @@ the engine's typed helpers from ``sofe.billing`` (S116-B1).
 from __future__ import annotations
 
 import uuid
-from datetime import date
+from datetime import date, timedelta
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from sofe.billing.ce import account_cost_filter, classify_ce_error, query_costs, query_resources
+from sofe.billing.credits import get_credit_allocations, get_credits
 from sofe.billing.models import CostQuery, Granularity, GroupBy, Metric, OrganizationResult
 from sofe.billing.organization import build_organization
 
@@ -22,6 +23,8 @@ router = APIRouter(tags=["billing"])
 
 BILLING_SESSION_NAME = "sofe-billing"
 MAX_RESOURCE_DAYS = 14
+MAX_CREDIT_BALANCE_DAYS = 365
+MAX_CREDIT_HISTORY_DAYS = 731
 
 _METRIC_ALIASES = {
     "unblended": Metric.unblended,
@@ -86,15 +89,16 @@ class BillingQueryRequest(BillingCredentials):
     def to_engine_query(self) -> CostQuery:
         if self.filter is not None:
             ce_filter = self.filter
-        elif self.account_id:
+        else:
+            # Build the record-type exclusion even when no account is scoped: an
+            # org-wide payer query must not include credits, or a fully
+            # credit-covered bill nets to ~$0 and looks like ``no_data``.
             ce_filter = account_cost_filter(
                 self.account_id,
                 exclude_credits=not self.include.credits,
                 exclude_refunds=not self.include.refunds,
                 exclude_taxes=not self.include.taxes,
             )
-        else:
-            ce_filter = None
         return CostQuery(
             start=self.from_date,
             end=self.to_date,
@@ -121,6 +125,37 @@ class BillingDimensionsRequest(BillingCredentials):
         if not self.dimension and not self.tag_key:
             raise ValueError("dimension or tag_key is required")
         return self
+
+
+class BillingCreditsRequest(BillingCredentials):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    account_id: str = Field(pattern=r"^[0-9]{12}$")
+    payer_account_flag: bool = False
+    from_date: date | None = Field(default=None, alias="from")
+    to_date: date | None = Field(default=None, alias="to")
+
+    @model_validator(mode="after")
+    def _dates(self) -> "BillingCreditsRequest":
+        if self.from_date and self.to_date and self.to_date <= self.from_date:
+            raise ValueError("to must be after from")
+        return self
+
+    def period(self, *, max_days: int, clamp_end: bool = False) -> tuple[date, date]:
+        today = date.today()
+        end = self.to_date or today
+        if clamp_end:
+            # GetCredits rejects a future endDate.
+            end = min(end, today)
+        start = self.from_date or (today - timedelta(days=max_days))
+        # The Billing API caps lookback by "today" (not by the requested end),
+        # so a period that ends long ago still fails unless it is recent.
+        if (today - start).days > max_days or (end - start).days > max_days + 31:
+            raise HTTPException(
+                status_code=400,
+                detail=f"the requested period is limited to {max_days} days",
+            )
+        return start, end
 
 
 def _billing_session(role_arn: str, external_id: str):
@@ -165,6 +200,99 @@ def _ce_error(exc: Exception) -> HTTPException:
     status, detail = classify_ce_error(exc)
     code = 403 if status.value in ("access_denied", "not_enabled") else 502
     return HTTPException(status_code=code, detail=f"{status.value}: {detail}")
+
+
+def _credits_body(result) -> dict[str, Any]:
+    return {
+        "request_id": str(uuid.uuid4()),
+        "period": {"start": result.period_start.isoformat(), "end": result.period_end.isoformat()},
+        "currency": "USD",
+        "totals": {
+            "initial": _amount(result.total_initial_cents),
+            "remaining": _amount(result.total_remaining_cents),
+            "estimated": _amount(result.total_estimated_cents),
+        },
+        "by_account": {account: _amount(cents) for account, cents in sorted(result.by_account.items())},
+        "credits": [
+            {
+                "credit_id": credit.credit_id,
+                "account_id": credit.account_id,
+                "credit_type": credit.credit_type,
+                "description": credit.description,
+                "initial": _amount(credit.initial_cents),
+                "remaining": _amount(credit.remaining_cents),
+                "estimated": _amount(credit.estimated_cents) if credit.estimated_cents is not None else None,
+                "start_date": credit.start_date.isoformat() if credit.start_date else None,
+                "end_date": credit.end_date.isoformat() if credit.end_date else None,
+                "exhaust_date": credit.exhaust_date.isoformat() if credit.exhaust_date else None,
+                "status": credit.status,
+                "products": credit.products,
+            }
+            for credit in result.credits
+        ],
+        "requests": result.requests,
+        "cost_status": result.status.value,
+        "cost_detail": result.detail,
+    }
+
+
+def _credit_history_body(result) -> dict[str, Any]:
+    return {
+        "request_id": str(uuid.uuid4()),
+        "period": {"start": result.period_start.isoformat(), "end": result.period_end.isoformat()},
+        "currency": "USD",
+        "entries": [
+            {
+                "billing_month": entry.billing_month,
+                "account_id": entry.account_id,
+                "service": entry.service,
+                "credit_id": entry.credit_id,
+                "amount": _amount(entry.amount_cents),
+                "description": entry.description,
+                "estimated": entry.estimated,
+            }
+            for entry in result.entries
+        ],
+        "total": _amount(result.total_cents),
+        "by_month": {month: _amount(cents) for month, cents in sorted(result.by_month.items())},
+        "by_account": {account: _amount(cents) for account, cents in sorted(result.by_account.items())},
+        "by_service": {
+            service: _amount(cents)
+            for service, cents in sorted(result.by_service.items(), key=lambda item: item[1], reverse=True)
+        },
+        "partial_results": result.partial,
+        "failed_months": result.failed_months,
+        "requests": result.requests,
+        "cost_status": result.status.value,
+        "cost_detail": result.detail,
+    }
+
+
+@router.post("/billing/credits")
+async def billing_credits(req: BillingCreditsRequest) -> dict[str, Any]:
+    start, end = req.period(max_days=MAX_CREDIT_BALANCE_DAYS, clamp_end=True)
+    session = _billing_session(req.role_arn, req.external_id)
+    result = get_credits(
+        session.get_credentials(),
+        account_id=req.account_id,
+        start=start,
+        end=end,
+        payer_account_flag=req.payer_account_flag,
+    )
+    return _credits_body(result)
+
+
+@router.post("/billing/credits/history")
+async def billing_credit_history(req: BillingCreditsRequest) -> dict[str, Any]:
+    start, end = req.period(max_days=MAX_CREDIT_HISTORY_DAYS)
+    session = _billing_session(req.role_arn, req.external_id)
+    result = get_credit_allocations(
+        session.get_credentials(),
+        account_id=req.account_id,
+        start=start,
+        end=end,
+    )
+    return _credit_history_body(result)
 
 
 @router.post("/billing/query")

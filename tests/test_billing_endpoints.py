@@ -2,11 +2,21 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 from botocore.exceptions import ClientError
 from fastapi.testclient import TestClient
 
 import sofe_server.app as appmod
+import sofe_server.billing as billing_mod
+from sofe.billing.models import (
+    CostStatus,
+    Credit,
+    CreditAllocation,
+    CreditAllocationResult,
+    CreditBalanceResult,
+)
 
 ROLE_ARN = "arn:aws:iam::111122223333:role/sofe-read-only"
 EXTERNAL_ID = "billing-test-external-id"
@@ -99,6 +109,9 @@ class FakeSession:
             return FakeSTS()
         raise AssertionError(f"unexpected service {service}")
 
+    def get_credentials(self):
+        return "fake-credentials"
+
 
 @pytest.fixture
 def assume(monkeypatch):
@@ -145,6 +158,20 @@ def test_query_assumes_billing_session_and_returns_cents_as_decimal(assume, clie
     assert ce_call[0] == "get_cost_and_usage"
     assert ce_call[1]["GroupBy"] == [{"Type": "DIMENSION", "Key": "SERVICE"}]
     assert {"Dimensions": {"Key": "LINKED_ACCOUNT", "Values": [ACCOUNT]}} in ce_call[1]["Filter"]["And"]
+
+
+def test_org_query_without_account_still_excludes_credits(assume, client):
+    _, session = assume
+    r = client.post(
+        "/billing/query",
+        json=body(group_by=[{"Type": "DIMENSION", "Key": "LINKED_ACCOUNT"}]),
+    )
+
+    assert r.status_code == 200
+    ce_call = session.ce.calls[0]
+    assert ce_call[1]["Filter"] == {
+        "Not": {"Dimensions": {"Key": "RECORD_TYPE", "Values": ["Credit", "Refund"]}}
+    }
 
 
 def test_query_rejects_three_group_by_before_aws(assume, client):
@@ -212,3 +239,102 @@ def test_ce_access_denied_is_visible_in_the_result(assume, client):
     assert r.status_code == 200
     assert r.json()["cost_status"] == "access_denied"
     assert "ce:GetCostAndUsage" in r.json()["cost_detail"]
+
+
+def test_credits_returns_balances_from_the_billing_api(assume, client, monkeypatch):
+    calls, session = assume
+    captured: dict = {}
+
+    def fake_get_credits(credentials, **kwargs):
+        captured["credentials"] = credentials
+        captured.update(kwargs)
+        return CreditBalanceResult(
+            credits=[
+                Credit(
+                    credit_id="1",
+                    account_id=ACCOUNT,
+                    credit_type="Promotion",
+                    description="AWS Heroes 2026",
+                    initial_cents=300000,
+                    remaining_cents=300000,
+                    estimated_cents=300000,
+                    start_date=date(2026, 1, 1),
+                    end_date=date(2028, 10, 1),
+                    status="ENABLED",
+                    products=["Amazon S3"],
+                )
+            ],
+            total_initial_cents=300000,
+            total_remaining_cents=300000,
+            total_estimated_cents=300000,
+            by_account={ACCOUNT: 300000},
+            status=CostStatus.ok,
+            requests=1,
+            period_start=date(2025, 11, 16),
+            period_end=date(2026, 11, 16),
+        )
+
+    monkeypatch.setattr(billing_mod, "get_credits", fake_get_credits)
+    r = client.post(
+        "/billing/credits",
+        json=body(account_id=ACCOUNT, payer_account_flag=True, **{"from": "2025-11-16", "to": "2026-11-16"}),
+    )
+
+    assert r.status_code == 200
+    payload = r.json()
+    assert captured["credentials"] == "fake-credentials"
+    assert captured["payer_account_flag"] is True
+    assert calls[0]["session_name"] == "sofe-billing"
+    assert payload["totals"] == {"initial": "3000.00", "remaining": "3000.00", "estimated": "3000.00"}
+    assert payload["by_account"] == {ACCOUNT: "3000.00"}
+    assert payload["credits"][0]["credit_id"] == "1"
+    assert payload["credits"][0]["start_date"] == "2026-01-01"
+    assert payload["cost_status"] == "ok"
+
+
+def test_credit_history_returns_entries_and_totals(assume, client, monkeypatch):
+    _, session = assume
+
+    def fake_history(credentials, **kwargs):
+        return CreditAllocationResult(
+            entries=[
+                CreditAllocation(
+                    account_id=ACCOUNT,
+                    billing_month="2026-10",
+                    service="AmazonQ",
+                    credit_id="1",
+                    amount_cents=1900,
+                )
+            ],
+            total_cents=1900,
+            by_month={"2026-10": 1900},
+            by_account={ACCOUNT: 1900},
+            by_service={"AmazonQ": 1900},
+            status=CostStatus.ok,
+            requests=1,
+            period_start=date(2026, 10, 1),
+            period_end=date(2026, 11, 1),
+        )
+
+    monkeypatch.setattr(billing_mod, "get_credit_allocations", fake_history)
+    r = client.post(
+        "/billing/credits/history",
+        json=body(account_id=ACCOUNT, **{"from": "2026-10-01", "to": "2026-11-01"}),
+    )
+
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["total"] == "19.00"
+    assert payload["by_service"] == {"AmazonQ": "19.00"}
+    assert payload["entries"][0]["billing_month"] == "2026-10"
+    assert payload["partial_results"] is False
+
+
+def test_credit_balance_period_is_limited_to_one_year(assume, client):
+    r = client.post(
+        "/billing/credits",
+        json=body(account_id=ACCOUNT, **{"from": "2024-01-01", "to": "2026-11-16"}),
+    )
+    assert r.status_code == 400
+    assert "365 days" in r.json()["detail"]
+    assert assume[0] == []

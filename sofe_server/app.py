@@ -22,7 +22,7 @@ from .billing import router as billing_router
 
 app = FastAPI(
     title="SOFE API",
-    version="0.4.0",
+    version="0.5.0",
     description="Stairway Open FinOps Engine — FinOps Policies as Code",
 )
 app.include_router(billing_router)
@@ -114,7 +114,7 @@ async def require_auth(request: Request, call_next):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "0.4.0"}
+    return {"status": "ok", "version": "0.5.0"}
 
 # --- Role-based evaluation (S111) ---
 #
