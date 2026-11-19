@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 from botocore.exceptions import ClientError
@@ -244,6 +244,9 @@ def test_ce_access_denied_is_visible_in_the_result(assume, client):
 def test_credits_returns_balances_from_the_billing_api(assume, client, monkeypatch):
     calls, session = assume
     captured: dict = {}
+    # The endpoint caps the window relative to today, so never hardcode dates that age out.
+    today = date.today()
+    start = today - timedelta(days=300)
 
     def fake_get_credits(credentials, **kwargs):
         captured["credentials"] = credentials
@@ -270,14 +273,14 @@ def test_credits_returns_balances_from_the_billing_api(assume, client, monkeypat
             by_account={ACCOUNT: 300000},
             status=CostStatus.ok,
             requests=1,
-            period_start=date(2025, 11, 16),
-            period_end=date(2026, 11, 16),
+            period_start=start,
+            period_end=today,
         )
 
     monkeypatch.setattr(billing_mod, "get_credits", fake_get_credits)
     r = client.post(
         "/billing/credits",
-        json=body(account_id=ACCOUNT, payer_account_flag=True, **{"from": "2025-11-16", "to": "2026-11-16"}),
+        json=body(account_id=ACCOUNT, payer_account_flag=True, **{"from": start.isoformat(), "to": today.isoformat()}),
     )
 
     assert r.status_code == 200
