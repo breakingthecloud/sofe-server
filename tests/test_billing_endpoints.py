@@ -222,6 +222,13 @@ def test_dimensions_and_tags(assume, client):
     assert r.status_code == 200
     assert r.json() == {"type": "tag", "key": "env", "values": ["prod", "dev"]}
 
+    r = client.post(
+        "/billing/dimensions",
+        json={"role_arn": ROLE_ARN, "external_id": EXTERNAL_ID, "from": "2026-10-01", "to": "2026-11-01"},
+    )
+    assert r.status_code == 200
+    assert r.json() == {"type": "tag_keys", "keys": ["env"]}
+
 
 def test_invalid_credentials_are_rejected_before_aws(assume, client):
     r = client.post("/billing/query", json=body() | {"external_id": "has space"})

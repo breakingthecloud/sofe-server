@@ -122,8 +122,6 @@ class BillingDimensionsRequest(BillingCredentials):
     def _dates(self) -> "BillingDimensionsRequest":
         if self.to_date <= self.from_date:
             raise ValueError("to must be after from")
-        if not self.dimension and not self.tag_key:
-            raise ValueError("dimension or tag_key is required")
         return self
 
 
@@ -332,6 +330,10 @@ async def billing_dimensions(req: BillingDimensionsRequest) -> dict[str, Any]:
     ce = session.client("ce", region_name="us-east-1")
     period = {"Start": req.from_date.isoformat(), "End": req.to_date.isoformat()}
     try:
+        if not req.tag_key and not req.dimension:
+            response = ce.get_tags(TimePeriod=period)
+            tags = response.get("Tags", []) or []
+            return {"type": "tag_keys", "keys": [tag.get("Key") for tag in tags if tag.get("Key")]}
         if req.tag_key:
             response = ce.get_tags(TimePeriod=period, TagKey=req.tag_key)
             tags = response.get("Tags", []) or []

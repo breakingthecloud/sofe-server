@@ -1,6 +1,6 @@
 [project]
 name = "sofe-server"
-version = "0.5.0"
+version = "0.6.0"
 description = "SOFE API Server — FinOps Policies as Code REST API"
 requires-python = ">=3.11"
 license = {text = "Apache-2.0"}
